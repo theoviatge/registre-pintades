@@ -1,6 +1,6 @@
 // Garde l'appli dans le téléphone pour l'ouvrir sans connexion, et sert les photos / PDF rangés sur l'appareil.
 // Les échanges avec la feuille Google ne passent pas par ce cache.
-const CACHE = "pintades-gs-v1";
+const CACHE = "pintades-gs-v2";
 const FILES = ["./", "index.html", "config.js", "gs.js",
   "manifest.webmanifest", "icon-192.png", "icon-512.png", "html2canvas.min.js", "jspdf.umd.min.js"];
 
