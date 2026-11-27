@@ -865,7 +865,10 @@ function renderIca() {
     $("#icaHost").replaceChildren();
     return;
   }
-  $("#icaInfo").replaceChildren(fiches.length > 1 ? el("div", { class: "sub" }, `Cette semaine prend des pintades sur ${fiches.length} lots : une fiche ICA pour chaque lot.`) : "");
+  $("#icaInfo").replaceChildren(
+    fiches.length > 1 ? el("div", { class: "sub" }, `Cette semaine prend des pintades sur ${fiches.length} lots : une fiche ICA pour chaque lot.`) : "",
+    el("div", { class: "btns" }, el("button", { type: "button", class: "btn okb", style: "flex:1", onclick: e => envoyerIcaSemaine(fiches, e.currentTarget) },
+      fiches.length > 1 ? `Envoyer les ${fiches.length} fiches de la semaine` : "Envoyer la fiche de la semaine")));
   const host = $("#icaHost"); host.replaceChildren();
   for (const w of fiches) {
     const total = w.enl.reduce((s, x) => s + x.n, 0), l = w.lots[0];
@@ -883,10 +886,8 @@ function renderIca() {
 $("#wkPrev").addEventListener("click", () => { state.icaWeek = addDays(state.icaWeek || mondayOf(today()), -7); renderIca(); });
 $("#wkNext").addEventListener("click", () => { state.icaWeek = addDays(state.icaWeek || mondayOf(today()), 7); renderIca(); });
 
-async function downloadIca(w, btn, avecLot) {
-  const dl = window.claude ? await claude.use("downloads") : null;
-  if (!dl || !window.html2canvas || !window.jspdf) return toast("Téléchargement indisponible ici");
-  btn.disabled = true; const label = btn.textContent; btn.textContent = "Préparation du PDF…";
+// Fabrique le PDF d'une fiche (page du modèle en fond, valeurs posées dessus).
+async function icaPdf(w, avecLot) {
   const holder = el("div", { style: "position:fixed;left:-10000px;top:0" }, fichePage(w));
   document.body.append(holder);
   try {
@@ -895,10 +896,44 @@ async function downloadIca(w, btn, avecLot) {
     const pdf = new window.jspdf.jsPDF({ unit: "mm", format: "a4" });
     pdf.addImage(canvas.toDataURL("image/jpeg", 0.92), "JPEG", 0, 0, 210, 297);
     const [y, m, d] = w.ficheDate.split("-");
-    await dl.save({ filename: `${y}.${m}.${d}.ICA PINTADE${avecLot ? " lot " + w.numero : ""}.pdf`, data: pdf.output("blob") });
+    return { name: `${y}.${m}.${d}.ICA PINTADE${avecLot ? " lot " + w.numero : ""}.pdf`, blob: pdf.output("blob") };
+  } finally { holder.remove(); }
+}
+async function downloadIca(w, btn, avecLot) {
+  const dl = window.claude ? await claude.use("downloads") : null;
+  if (!dl || !window.html2canvas || !window.jspdf) return toast("Téléchargement indisponible ici");
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "Préparation du PDF…";
+  try {
+    const f = await icaPdf(w, avecLot);
+    await dl.save({ filename: f.name, data: f.blob });
     toast("Fiche enregistrée");
   } catch (e) { if (!e || e.code !== "declined") toast("Le PDF n'a pas pu être créé"); }
-  finally { holder.remove(); btn.disabled = false; btn.textContent = label; }
+  finally { btn.disabled = false; btn.textContent = label; }
+}
+// Toutes les fiches de la semaine d'un coup : le téléphone ouvre son menu « Partager »
+// (Gmail, WhatsApp…) avec tous les PDF joints. Sans ce menu, les PDF sont enregistrés l'un après l'autre.
+async function envoyerIcaSemaine(fiches, btn) {
+  if (!window.html2canvas || !window.jspdf) return toast("Envoi indisponible ici");
+  btn.disabled = true; const label = btn.textContent;
+  try {
+    const files = [];
+    for (let i = 0; i < fiches.length; i++) {
+      btn.textContent = `Préparation de la fiche ${i + 1} sur ${fiches.length}…`;
+      const f = await icaPdf(fiches[i], fiches.length > 1);
+      files.push(new File([f.blob], f.name, { type: "application/pdf" }));
+    }
+    const mon = fiches[0].mon, titre = `Fiches ICA pintades – semaine ${isoWeek(mon)}`;
+    const texte = `Bonjour,\n\nVoici les fiches ICA pintades de la semaine ${isoWeek(mon)} (du ${fmtDate(mon)} au ${fmtDate(addDays(mon, 6))}) : lot${fiches.length > 1 ? "s" : ""} ${fiches.map(w => w.numero).join(", ")}.\n\nCordialement,\nSCEA du Lacas`;
+    if (navigator.canShare && navigator.canShare({ files })) {
+      try { await navigator.share({ files, title: titre, text: texte }); toast("Fiches envoyées"); return; }
+      catch (e) { if (e && e.name === "AbortError") return; }
+    }
+    const dl = window.claude ? await claude.use("downloads") : null;
+    if (!dl) return toast("Envoi indisponible ici");
+    for (const f of files) await dl.save({ filename: f.name, data: f });
+    toast(files.length > 1 ? `${files.length} fiches enregistrées` : "Fiche enregistrée");
+  } catch (e) { if (!e || e.code !== "declined") toast("Les PDF n'ont pas pu être créés"); }
+  finally { btn.disabled = false; btn.textContent = label; }
 }
 
 $("#icaSettings").addEventListener("click", () => {
