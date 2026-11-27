@@ -784,30 +784,26 @@ function isoWeek(s) {
 const escH = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtPct = v => v.toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + "%";
 
+// Une fiche ICA par lot et par semaine : si les départs de la semaine prennent des pintades sur 2 lots, 2 fiches.
+// Les mortes saisies ne sont jamais reportées sur la fiche (demande de l'éleveur) : 2 % fixe et 0 sur les deux autres lignes.
 function weekData(mon) {
   const sun = addDays(mon, 6), C = lastC || compute(), cfg = icaCfg();
   const deps = state.departs.filter(d => d.date >= mon && d.date <= sun).sort((a, b) => a.date.localeCompare(b.date) || (a.creeLe || "").localeCompare(b.creeLe || ""));
-  if (!deps.length) return null;
-  const jours = {};
-  for (const d of deps) jours[d.date] = (jours[d.date] || 0) + (+d.nombre || 0);
-  const enl = Object.entries(jours).sort((a, b) => a[0].localeCompare(b[0])).map(([date, n]) => ({ date, n }));
-  const ids = new Set();
-  for (const d of deps) for (const p of C.alloc[d.id] || []) if (p.n > 0) ids.add(p.lotId);
-  const lots = C.lots.filter(l => ids.has(l.id));
-  const first = enl[0].date, morts = [];
-  for (const m of state.morts) for (const p of C.alloc[m.id] || []) if (ids.has(p.lotId)) morts.push({ date: m.date, n: p.n });
-  const mis = lots.reduce((s, l) => s + l.nombre, 0), totMort = morts.reduce((s, m) => s + m.n, 0);
-  return {
-    mon, sun, deps, enl, lots,
-    numero: lots.map(l => l.numero).join(" / ") || "–",
-    mis: lots.map(l => fmtN(l.nombre)).join(" + "),
-    dateMep: lots.map(l => fmtDate(l.date)).join(" / "),
-    totMort, mortPct: mis ? fmtPct(totMort / mis * 100) : "0%",
-    cumul15: morts.filter(m => m.date <= addDays(first, -15)).reduce((s, m) => s + m.n, 0),
-    semPrec: morts.filter(m => m.date >= addDays(first, -7) && m.date < first).reduce((s, m) => s + m.n, 0),
-    abattoir: (deps.find(d => d.abattoir) || {}).abattoir || cfg.abattoir,
-    ficheDate: addDays(mon, -2)
-  };
+  if (!deps.length) return [];
+  const parLot = {};
+  for (const d of deps) for (const p of C.alloc[d.id] || []) if (p.n > 0) {
+    const j = parLot[p.lotId] || (parLot[p.lotId] = { jours: {}, deps: [] });
+    j.jours[d.date] = (j.jours[d.date] || 0) + p.n; j.deps.push(d);
+  }
+  return C.lots.filter(l => parLot[l.id]).sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => {
+    const enl = Object.entries(parLot[l.id].jours).sort((a, b) => a[0].localeCompare(b[0])).map(([date, n]) => ({ date, n }));
+    return {
+      mon, sun, deps: parLot[l.id].deps, enl, lots: [l],
+      numero: l.numero || "–", mis: fmtN(l.nombre), dateMep: fmtDate(l.date),
+      abattoir: (parLot[l.id].deps.find(d => d.abattoir) || {}).abattoir || cfg.abattoir,
+      ficheDate: addDays(mon, -2)
+    };
+  });
 }
 
 // Positions en points PDF, relevées sur le modèle « ICA PINTADE » (page A4 de 595 pt de large).
@@ -834,8 +830,8 @@ function fichePage(w) {
   put(161.4, 214.6, w.mis, plusieurs ? 10 : 12);
   put(312.5, 214.6, w.dateMep, plusieurs ? 8.5 : 12);
   put(259.3, 447, "2%"); // toujours 2 % de pertes sur la fiche, demandé par l'éleveur
-  put(262.5, 463.9, String(w.cumul15));
-  put(262.5, 476.7, String(w.semPrec));
+  put(262.5, 463.9, "0"); // les mortes saisies ne vont jamais sur la fiche
+  put(262.5, 476.7, "0");
   if (enl[0]) { put(174, 652.5, fmtDate(enl[0].date), 13); put(193.4, 679, fmtN(enl[0].n)); }
   if (enl[1]) { put(329, 653, fmtDate(enl[1].date), 13); put(356.5, 679, fmtN(enl[1].n)); }
   if (enl[2]) { put(470, 653, fmtDate(enl[2].date), 13); put(538, 679, fmtN(enl[2].n)); }
@@ -850,7 +846,7 @@ function fitPaper(wrap) {
   page.style.transform = `scale(${s})`;
   wrap.style.width = 794 * s + "px"; wrap.style.height = 1123 * s + "px";
 }
-addEventListener("resize", () => { const w = $(".paper-wrap"); if (w) fitPaper(w); });
+addEventListener("resize", () => document.querySelectorAll(".paper-wrap").forEach(fitPaper));
 
 function renderIca() {
   const sec = document.querySelector('section[data-view="ica"]');
@@ -861,30 +857,33 @@ function renderIca() {
   const mons = [...new Set(state.departs.map(d => mondayOf(d.date)))].sort();
   $("#wkList").replaceChildren(...mons.map(m => el("button", { type: "button", "aria-pressed": String(m === mon), onclick: () => { state.icaWeek = m; renderIca(); } },
     "S" + isoWeek(m) + " · " + fmtDate(m).slice(0, 5))));
-  const w = weekData(mon);
-  if (!w) {
+  const fiches = weekData(mon);
+  if (!fiches.length) {
     $("#icaInfo").replaceChildren(el("div", { class: "empty" }, el("b", {}, "Aucun départ abattoir cette semaine. "),
       "Saisissez les départs prévus dans l'onglet Départs, avec leur date à venir : la fiche de la semaine se remplit toute seule.",
       mons.length ? " Les semaines avec des départs sont listées au-dessus." : ""));
     $("#icaHost").replaceChildren();
     return;
   }
-  const total = w.enl.reduce((s, x) => s + x.n, 0);
-  $("#icaInfo").replaceChildren(el("div", { class: "item" },
-    el("div", { class: "row" }, el("b", {}, (w.lots.length > 1 ? "Lots " : "Lot ") + w.numero), el("span", { class: "sub num" }, "Fiche datée du " + fmtDate(w.ficheDate))),
-    el("div", { class: "chips" },
-      w.lots.map(l => el("span", { class: "chip" }, `${l.numero} · ${l.eleveur}`)),
-      el("span", { class: "chip sold num" }, plural(w.enl.length, "enlèvement") + " · " + plural(total, "pintade")),
-      el("span", { class: "chip dead num" }, "Mortalité " + w.mortPct)),
-    el("div", { class: "btns" }, el("button", { type: "button", class: "btn primary", onclick: e => downloadIca(w, e.currentTarget) }, "Télécharger la fiche (PDF)"))));
-  const wrap = el("div", { class: "paper-wrap" }, fichePage(w));
-  $("#icaHost").replaceChildren(wrap);
-  fitPaper(wrap);
+  $("#icaInfo").replaceChildren(fiches.length > 1 ? el("div", { class: "sub" }, `Cette semaine prend des pintades sur ${fiches.length} lots : une fiche ICA pour chaque lot.`) : "");
+  const host = $("#icaHost"); host.replaceChildren();
+  for (const w of fiches) {
+    const total = w.enl.reduce((s, x) => s + x.n, 0), l = w.lots[0];
+    host.append(el("div", { class: "item", style: "margin-bottom:10px" },
+      el("div", { class: "row" }, el("b", {}, "Lot " + w.numero), el("span", { class: "sub num" }, "Fiche datée du " + fmtDate(w.ficheDate))),
+      el("div", { class: "chips" },
+        el("span", { class: "chip" }, `${l.numero} · ${l.eleveur}`),
+        el("span", { class: "chip sold num" }, plural(w.enl.length, "enlèvement") + " · " + plural(total, "pintade"))),
+      el("div", { class: "btns" }, el("button", { type: "button", class: "btn primary", onclick: e => downloadIca(w, e.currentTarget, fiches.length > 1) }, "Télécharger la fiche du lot " + w.numero + " (PDF)"))));
+    const wrap = el("div", { class: "paper-wrap", style: "margin-bottom:22px" }, fichePage(w));
+    host.append(wrap);
+    fitPaper(wrap);
+  }
 }
 $("#wkPrev").addEventListener("click", () => { state.icaWeek = addDays(state.icaWeek || mondayOf(today()), -7); renderIca(); });
 $("#wkNext").addEventListener("click", () => { state.icaWeek = addDays(state.icaWeek || mondayOf(today()), 7); renderIca(); });
 
-async function downloadIca(w, btn) {
+async function downloadIca(w, btn, avecLot) {
   const dl = window.claude ? await claude.use("downloads") : null;
   if (!dl || !window.html2canvas || !window.jspdf) return toast("Téléchargement indisponible ici");
   btn.disabled = true; const label = btn.textContent; btn.textContent = "Préparation du PDF…";
@@ -896,7 +895,7 @@ async function downloadIca(w, btn) {
     const pdf = new window.jspdf.jsPDF({ unit: "mm", format: "a4" });
     pdf.addImage(canvas.toDataURL("image/jpeg", 0.92), "JPEG", 0, 0, 210, 297);
     const [y, m, d] = w.ficheDate.split("-");
-    await dl.save({ filename: `${y}.${m}.${d}.ICA PINTADE.pdf`, data: pdf.output("blob") });
+    await dl.save({ filename: `${y}.${m}.${d}.ICA PINTADE${avecLot ? " lot " + w.numero : ""}.pdf`, data: pdf.output("blob") });
     toast("Fiche enregistrée");
   } catch (e) { if (!e || e.code !== "declined") toast("Le PDF n'a pas pu être créé"); }
   finally { holder.remove(); btn.disabled = false; btn.textContent = label; }
